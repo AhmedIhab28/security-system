@@ -113,7 +113,6 @@ export const translations = {
     myVisitors: "My Visitors",
     parkingSpot: "Parking Spot",
     phone: "Phone",
-    apartment: "Apartment",
     // Admin
     manageUsers: "Manage Users",
     addUser: "+ Add User",
@@ -237,7 +236,6 @@ export const translations = {
     myVisitors: "زوار",
     parkingSpot: "موقف السيارة",
     phone: "الهاتف",
-    apartment: "الشقة",
     // Admin
     manageUsers: "إدارة المستخدمين",
     addUser: "+ إضافة مستخدم",
