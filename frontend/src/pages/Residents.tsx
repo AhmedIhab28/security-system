@@ -79,8 +79,8 @@ export default function Residents() {
                 <option value="staff">{t.staff}</option>
               </select>
               <div>
-                <label className="text-sm text-gray-600">{t.photo}</label>
-                <input name="photo" type="file" accept="image/*" ref={photoRef} required
+                <label className="text-sm text-gray-600">{t.photo} (optional)</label>
+                <input name="photo" type="file" accept="image/*" ref={photoRef}
                   className="w-full mt-1" />
               </div>
               <div className="flex gap-2">

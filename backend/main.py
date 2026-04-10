@@ -659,6 +659,60 @@ def delete_apartment(apt_id: int, db: Session = Depends(get_db), _=Depends(requi
     return {"status": "deactivated"}
 
 
+# ── Apartment Vehicles ────────────────────────────────────────────────────────
+
+class AptVehicleBody(BaseModel):
+    plate_number: str
+    make: Optional[str] = None
+    model: Optional[str] = None
+    color: Optional[str] = None
+    parking_spot: Optional[str] = None
+
+
+@app.post("/apartments/{apt_id}/vehicles")
+def add_apartment_vehicle(apt_id: int, body: AptVehicleBody,
+                          db: Session = Depends(get_db),
+                          current_user: SecurityUser = Depends(require_admin_or_building_admin)):
+    apt = db.query(Apartment).filter(Apartment.id == apt_id).first()
+    if not apt:
+        raise HTTPException(404, "Apartment not found")
+    v = ApartmentVehicle(
+        apartment_id=apt_id,
+        plate_number=body.plate_number,
+        make=body.make,
+        model=body.model,
+        color=body.color,
+        parking_spot=body.parking_spot,
+    )
+    db.add(v)
+    db.commit()
+    return {"id": v.id, "plate_number": v.plate_number}
+
+
+@app.get("/apartments/{apt_id}/vehicles")
+def list_apartment_vehicles(apt_id: int, db: Session = Depends(get_db),
+                             _=Depends(get_current_user)):
+    return db.query(ApartmentVehicle).filter(
+        ApartmentVehicle.apartment_id == apt_id,
+        ApartmentVehicle.is_active == True,
+    ).all()
+
+
+@app.delete("/apartments/{apt_id}/vehicles/{vehicle_id}")
+def delete_apartment_vehicle(apt_id: int, vehicle_id: int,
+                              db: Session = Depends(get_db),
+                              _=Depends(require_admin_or_building_admin)):
+    v = db.query(ApartmentVehicle).filter(
+        ApartmentVehicle.id == vehicle_id,
+        ApartmentVehicle.apartment_id == apt_id,
+    ).first()
+    if not v:
+        raise HTTPException(404, "Not found")
+    v.is_active = False
+    db.commit()
+    return {"status": "deleted"}
+
+
 # ── Resident Users ────────────────────────────────────────────────────────────
 
 class ResidentRegisterBody(BaseModel):
