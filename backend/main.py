@@ -27,11 +27,7 @@ SECRET_KEY = os.getenv("SECRET_KEY", "change-me-in-production-use-a-long-random-
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 12
 
-ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://localhost:5173",
-    os.getenv("FRONTEND_URL", "https://security-system-ui.vercel.app"),
-]
+ALLOWED_ORIGINS = ["*"]
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
@@ -39,8 +35,8 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
 app = FastAPI(title="SecureWatch API")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
