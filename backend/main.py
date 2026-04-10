@@ -1,25 +1,21 @@
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect, BackgroundTasks
-from fastapi.staticfiles import StaticFiles
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
-from typing import Optional, List
+from typing import Optional
 import asyncio
-import cv2
 import os
 import secrets
-import pickle
 
 from database import get_db, init_db, SessionLocal
 from models import (
-    Person, Vehicle, Camera, Building, BuildingGroup,
-    AccessLog, Alert, SecurityUser, VisitorLog,
+    Building, BuildingGroup,
+    Alert, SecurityUser, VisitorLog,
     ShiftLog, ResidentUser, ApartmentVehicle, VisitorRequest,
     Apartment, EmergencyLog, EmergencyType, EmergencyStatus,
-    UserRole, PersonRole, VisitorType, VisitorStatus
+    UserRole, VisitorType, VisitorStatus
 )
-from recognition import encode_face_from_bytes, analyze_frame, save_snapshot
 from alerts import broadcast_alert, register_ws, unregister_ws
 
 from jose import JWTError, jwt
@@ -48,7 +44,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.mount("/snapshots", StaticFiles(directory="snapshots"), name="snapshots")
 
 
 @app.on_event("startup")
@@ -56,7 +51,6 @@ async def startup():
     init_db()
     asyncio.create_task(_weekly_reset_scheduler())
     asyncio.create_task(_overdue_visitor_checker())
-
 
 @app.get("/health")
 def health():
@@ -271,147 +265,6 @@ def delete_building(building_id: int, db: Session = Depends(get_db), _=Depends(r
     return {"status": "deleted"}
 
 
-# ── Cameras ───────────────────────────────────────────────────────────────────
-
-@app.get("/cameras")
-def list_cameras(building_id: Optional[int] = None, db: Session = Depends(get_db),
-                 current_user: SecurityUser = Depends(get_current_user)):
-    q = db.query(Camera)
-    if current_user.role == UserRole.building_admin:
-        q = q.filter(Camera.building_id == current_user.admin_building_id)
-    elif building_id:
-        q = q.filter(Camera.building_id == building_id)
-    return q.all()
-
-
-@app.post("/cameras")
-def add_camera(name: str, stream_url: str, building_id: int,
-               location_description: str = "",
-               db: Session = Depends(get_db),
-               current_user: SecurityUser = Depends(require_admin_or_building_admin)):
-    if current_user.role == UserRole.building_admin and current_user.admin_building_id != building_id:
-        raise HTTPException(403, "Not your building")
-    cam = Camera(name=name, stream_url=stream_url, building_id=building_id,
-                 location_description=location_description)
-    db.add(cam)
-    db.commit()
-    return {"id": cam.id, "name": cam.name}
-
-
-@app.delete("/cameras/{camera_id}")
-def delete_camera(camera_id: int, db: Session = Depends(get_db), _=Depends(require_admin)):
-    cam = db.query(Camera).filter(Camera.id == camera_id).first()
-    if not cam:
-        raise HTTPException(404, "Not found")
-    db.delete(cam)
-    db.commit()
-    return {"status": "deleted"}
-
-
-@app.post("/cameras/{camera_id}/start")
-async def start_camera(camera_id: int, db: Session = Depends(get_db),
-                       current_user: SecurityUser = Depends(require_admin_or_building_admin)):
-    cam = db.query(Camera).filter(Camera.id == camera_id).first()
-    if not cam:
-        raise HTTPException(404, "Camera not found")
-    if current_user.role == UserRole.building_admin and cam.building_id != current_user.admin_building_id:
-        raise HTTPException(403, "Not your building")
-    if camera_id in _camera_tasks and not _camera_tasks[camera_id].done():
-        return {"status": "already running"}
-    building = db.query(Building).filter(Building.id == cam.building_id).first()
-    task = asyncio.create_task(
-        process_camera_stream(camera_id, cam.stream_url, building.group_id)
-    )
-    _camera_tasks[camera_id] = task
-    return {"status": "started", "camera": cam.name}
-
-
-@app.post("/cameras/{camera_id}/stop")
-async def stop_camera(camera_id: int, _=Depends(require_admin_or_building_admin)):
-    task = _camera_tasks.get(camera_id)
-    if task and not task.done():
-        task.cancel()
-    return {"status": "stopped"}
-
-
-# ── Persons (admin only) ──────────────────────────────────────────────────────
-
-@app.get("/persons")
-def list_persons(group_id: Optional[int] = None, db: Session = Depends(get_db),
-                 current_user: SecurityUser = Depends(get_current_user)):
-    q = db.query(Person)
-    if current_user.role == UserRole.building_admin:
-        q = q.filter(Person.building_group_id == current_user.building_group_id)
-    elif group_id:
-        q = q.filter(Person.building_group_id == group_id)
-    return [{"id": p.id, "name": p.name, "role": p.role, "is_active": p.is_active,
-             "photo_path": p.photo_path} for p in q.all()]
-
-
-@app.post("/persons")
-async def add_person(name: str, role: PersonRole, building_group_id: int,
-                     photo: UploadFile = File(...),
-                     db: Session = Depends(get_db),
-                     current_user: SecurityUser = Depends(require_admin_or_building_admin)):
-    photo_bytes = await photo.read()
-    enc_bytes = encode_face_from_bytes(photo_bytes)
-    photo_path = f"snapshots/person_{name.replace(' ', '_')}_{secrets.token_hex(4)}.jpg"
-    with open(photo_path, "wb") as f:
-        f.write(photo_bytes)
-    person = Person(name=name, role=role, face_encoding=enc_bytes,
-                    photo_path=photo_path, building_group_id=building_group_id)
-    db.add(person)
-    db.commit()
-    return {"id": person.id, "name": person.name, "has_face": enc_bytes is not None}
-
-
-@app.delete("/persons/{person_id}")
-def delete_person(person_id: int, db: Session = Depends(get_db),
-                  current_user: SecurityUser = Depends(require_admin_or_building_admin)):
-    p = db.query(Person).filter(Person.id == person_id).first()
-    if not p:
-        raise HTTPException(404, "Not found")
-    p.is_active = False
-    db.commit()
-    return {"status": "deactivated"}
-
-
-# ── Vehicles ──────────────────────────────────────────────────────────────────
-
-@app.get("/vehicles")
-def list_vehicles(group_id: Optional[int] = None, db: Session = Depends(get_db),
-                  current_user: SecurityUser = Depends(get_current_user)):
-    q = db.query(Vehicle)
-    if current_user.role == UserRole.building_admin:
-        q = q.filter(Vehicle.building_group_id == current_user.building_group_id)
-    elif group_id:
-        q = q.filter(Vehicle.building_group_id == group_id)
-    return q.all()
-
-
-@app.post("/vehicles")
-def add_vehicle(plate_number: str, make: str, model: str, color: str,
-                building_group_id: int, owner_id: Optional[int] = None,
-                db: Session = Depends(get_db),
-                current_user: SecurityUser = Depends(require_admin_or_building_admin)):
-    v = Vehicle(plate_number=plate_number, make=make, model=model, color=color,
-                building_group_id=building_group_id, owner_id=owner_id)
-    db.add(v)
-    db.commit()
-    return {"id": v.id, "plate_number": v.plate_number}
-
-
-@app.delete("/vehicles/{vehicle_id}")
-def delete_vehicle(vehicle_id: int, db: Session = Depends(get_db),
-                   current_user: SecurityUser = Depends(require_admin_or_building_admin)):
-    v = db.query(Vehicle).filter(Vehicle.id == vehicle_id).first()
-    if not v:
-        raise HTTPException(404, "Not found")
-    v.is_active = False
-    db.commit()
-    return {"status": "deactivated"}
-
-
 # ── Visitor Logs ──────────────────────────────────────────────────────────────
 
 class VisitorLogCreate(BaseModel):
@@ -600,17 +453,6 @@ def resolve_alert(alert_id: int, db: Session = Depends(get_db),
     alert.resolved_by = current_user.id
     db.commit()
     return {"status": "resolved"}
-
-
-# ── Access Logs ───────────────────────────────────────────────────────────────
-
-@app.get("/access-logs")
-def list_access_logs(camera_id: Optional[int] = None, limit: int = 50,
-                     db: Session = Depends(get_db), _=Depends(get_current_user)):
-    q = db.query(AccessLog)
-    if camera_id:
-        q = q.filter(AccessLog.camera_id == camera_id)
-    return q.order_by(AccessLog.timestamp.desc()).limit(limit).all()
 
 
 # ── Weekly Reset ──────────────────────────────────────────────────────────────
@@ -1198,92 +1040,6 @@ async def _overdue_visitor_checker():
             print(f"[Overdue checker] {e}")
         finally:
             db.close()
-
-
-# ── Camera Stream Processing ──────────────────────────────────────────────────
-
-_camera_tasks: dict[int, asyncio.Task] = {}
-
-
-async def process_camera_stream(camera_id: int, stream_url: str, building_group_id: int):
-    import cv2
-    cap = cv2.VideoCapture(stream_url)
-    frame_skip = 0
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            await asyncio.sleep(2)
-            cap = cv2.VideoCapture(stream_url)
-            continue
-        frame_skip += 1
-        if frame_skip % 10 != 0:
-            await asyncio.sleep(0.03)
-            continue
-        db = SessionLocal()
-        try:
-            known = db.query(Person.id, Person.face_encoding).filter(
-                Person.building_group_id == building_group_id,
-                Person.is_active == True,
-                Person.face_encoding != None,
-            ).all()
-            results = analyze_frame(frame, known)
-            for face in results["faces"]:
-                if face["is_unknown"]:
-                    snapshot = save_snapshot(frame, camera_id)
-                    log = AccessLog(camera_id=camera_id, event_type="spotted",
-                                    confidence=face["confidence"], snapshot_path=snapshot, is_unknown=True)
-                    db.add(log)
-                    db.flush()
-                    cam = db.query(Camera).filter(Camera.id == camera_id).first()
-                    building = db.query(Building).filter(Building.id == cam.building_id).first()
-                    alert = Alert(
-                        alert_type="unknown_person",
-                        access_log_id=log.id,
-                        camera_id=camera_id,
-                        building_id=cam.building_id,
-                        building_group_id=building_group_id,
-                        message=f"Unknown person on camera '{cam.name}' at {cam.location_description}",
-                        snapshot_path=snapshot,
-                    )
-                    db.add(alert)
-                    db.commit()
-                    await broadcast_alert({
-                        "type": "unknown_person",
-                        "title": "Unknown Person Detected",
-                        "message": alert.message,
-                        "camera_id": camera_id,
-                        "camera_name": cam.name,
-                        "location": cam.location_description,
-                        "building": building.name if building else "",
-                        "snapshot": f"/snapshots/{snapshot.split('/')[-1]}",
-                        "alert_id": alert.id,
-                        "timestamp": alert.created_at.isoformat(),
-                    }, building_group_id, db)
-                else:
-                    log = AccessLog(person_id=face["person_id"], camera_id=camera_id,
-                                    event_type="spotted", confidence=face["confidence"], is_unknown=False)
-                    db.add(log)
-                    db.commit()
-            # Unknown vehicles
-            for vehicle in results["vehicles"]:
-                if vehicle.get("is_unknown"):
-                    snapshot = save_snapshot(frame, camera_id)
-                    cam = db.query(Camera).filter(Camera.id == camera_id).first()
-                    alert = Alert(
-                        alert_type="unknown_vehicle",
-                        camera_id=camera_id,
-                        building_id=cam.building_id,
-                        building_group_id=building_group_id,
-                        message=f"Unknown vehicle on camera '{cam.name}'",
-                        snapshot_path=snapshot,
-                    )
-                    db.add(alert)
-                    db.commit()
-        except Exception as e:
-            print(f"[Camera {camera_id}] {e}")
-        finally:
-            db.close()
-        await asyncio.sleep(0.03)
 
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────

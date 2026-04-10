@@ -118,8 +118,6 @@ class Camera(Base):
     building_id = Column(Integer, ForeignKey("buildings.id"))
     is_active = Column(Boolean, default=True)
     building = relationship("Building", back_populates="cameras")
-
-
 # ── Security users (guards + admin) ──────────────────────────────────────────
 
 class SecurityUser(Base):
