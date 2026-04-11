@@ -2,7 +2,7 @@ const { app, BrowserWindow, shell } = require("electron");
 const path = require("path");
 
 // Set this to your deployed Vercel URL after deployment
-const PROD_URL = "https://security-system-prmve40rm-ahmed28.vercel.app";
+const PROD_URL = "https://security-system-black.vercel.app";
 
 function createWindow() {
   const win = new BrowserWindow({
